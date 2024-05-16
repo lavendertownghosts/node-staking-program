@@ -1,5 +1,7 @@
+mod account; use account::*;
 mod error; use error::ErrorCode;
 mod access_control; use access_control::*;
+mod helper; use helper::*;
 
 use {
     anchor_lang::prelude::*,
@@ -18,7 +20,7 @@ pub mod node_staking {
         ctx: Context<InitializePool>,
         tokens_per_node: u64,           // number of tokens to purchase node
         reward_per_node: u8,            // reward of each node to user per day
-        max_allocation: u64,            // limit number of nodes purchased by each wallet
+        max_allocation: u16,            // limit number of nodes purchased by each wallet
     ) -> Result<()> {
         let pool_state = &mut ctx.accounts.pool_state;
 
@@ -33,7 +35,7 @@ pub mod node_staking {
     pub fn initialize_presale(
         ctx: Context<InitializePresale>,
         price_per_node: u64,            // when presale, sol to purchase node
-        max_allocation: u64,            // when presale, limit number of nodes purchased by each wallet
+        max_allocation: u16,            // when presale, limit number of nodes purchased by each wallet
         presale_start_at: i64,         
         presale_end_at: i64,
         total_presale_amount: u64,
@@ -60,11 +62,49 @@ pub mod node_staking {
     }
 
     pub fn initialize_user_stake(ctx: Context<InitializeUserStake>) -> Result<()> {
+        let user_stake_entry = &mut ctx.accounts.user_stake_entry;
+        user_stake_entry.stakes_number = 0;
+
+        let stake_info = StakeInfo {
+            amount: 0,
+            stake_date: Clock::get().unwrap().unix_timestamp,
+        };
+
+        user_stake_entry.stakes.push(stake_info);
+
         Ok(())
     }
 
-    #[access_control(round_presale(&ctx.accounts.presale, &ctx.accounts.clock))]
-    pub fn sell_nodes_at_presale(ctx: Context<PresaleNodes>, amount: u64) -> Result<()> {
+    #[access_control(round_presale(&ctx.accounts.presale_state, &ctx.accounts.clock))]
+    pub fn sell_nodes_at_presale(ctx: Context<PresaleNodes>, amount: u16) -> Result<()> {
+        let user_stake_entry = &mut ctx.accounts.user_stake_entry;
+        let presale_state = &mut ctx.accounts.presale_state;
+        let pool_state = &mut ctx.accounts.pool_state;
+        let user_lamports = **ctx.accounts.user.to_account_info().try_borrow_lamports()?;
+        let needed_lamports = presale_state.price_per_node.checked_mul(amount.into()).ok_or(ErrorCode::UnableCalculatingNodesPrice)?;
+
+        require!(user_stake_entry.stakes_number + amount < presale_state.max_allocation, 
+            ErrorCode::StakesAmountOverflow
+        );
+        require!(pool_state.total_nodes > amount.into(), 
+            ErrorCode::LackNodes
+        );
+        require!(user_lamports > needed_lamports, ErrorCode::InsufficientBalanceForPresale);
+
+        let user = &mut ctx.accounts.user;
+        let presale_valut = &mut ctx.accounts.presale_vault;
+
+        send_lamports(user.to_account_info(), presale_valut.to_account_info(), needed_lamports)?;
+
+        let stake_info = StakeInfo {
+            amount,
+            stake_date: presale_state.presale_end_at,
+        };
+
+        user_stake_entry.stakes_number = user_stake_entry.stakes_number.checked_add(amount).ok_or(ErrorCode::UserAmountOverflow)?;
+
+        user_stake_entry.stakes.push(stake_info);
+
         Ok(())
     }
 }
@@ -74,11 +114,19 @@ pub struct InitializePresale<'info> {
     #[account(
         init, 
         payer = pool_authority, 
-        space = 8 + 8 + 8 + 8 + 8 + 8 + 8,
+        space = 8 + PresaleState::SPACE,
         seeds = [b"pool_state"],
         bump
     )]
     pub presale: Account<'info, PresaleState>, 
+    #[account(
+        init,
+        payer = pool_authority,
+        space = 8,
+        seeds = [b"presale_vault"],
+        bump
+    )]
+    pub presale_valut: Account<'info, PresaleVault>,
     #[account(
         mut,
         constraint = pool_authority.key() == POOL_AUTHORITY
@@ -90,13 +138,8 @@ pub struct InitializePresale<'info> {
 }
 
 #[account]
-pub struct PresaleState {
-    pub price_per_node: u64,
-    pub max_allocation: u64,
-    pub presale_start_at: i64,
-    pub presale_end_at: i64,
-    pub total_presale_amount: u64,
-    pub sold_nodes: u64
+pub struct PresaleVault{
+
 }
 
 #[derive(Accounts)]
@@ -104,7 +147,7 @@ pub struct InitializePool<'info> {
     #[account(
         init, 
         payer = pool_authority, 
-        space = 8 + 41,
+        space = 8 + PoolState::SPACE,
         seeds = [b"presale_state"],
         bump
     )]
@@ -116,15 +159,6 @@ pub struct InitializePool<'info> {
     )]
     pub pool_authority: Signer<'info>,
     pub system_program: Program<'info, System>,
-}
-
-#[account]
-pub struct PoolState {
-    pub max_allocation: u64,
-    pub total_nodes: u64,
-    pub total_tokens: u64,
-    pub tokens_per_node: u64,
-    pub reward_per_node: u8,
 }
 
 #[derive(Accounts)]
@@ -147,7 +181,7 @@ pub struct InitializeUserStake<'info> {
     #[account(
         init,
         payer = user,
-        space = 14 + 16,
+        space = 8 + UserStakeEntry::SPACE,
         seeds = [user.key().as_ref()],
         bump
     )]
@@ -157,33 +191,28 @@ pub struct InitializeUserStake<'info> {
     pub system_program: Program<'info, System>
 }
 
-#[account]
-pub struct UserStakeEntry {
-    stakes_number: u16,
-    stakes: Vec<StakeInfo>
-}
-
-#[account]
-pub struct StakeInfo {
-    amount: u64,
-    stake_date: i64,
-}
-
 #[derive(Accounts)]
 pub struct PresaleNodes<'info> {
     #[account(
         mut,
         seeds = [user.key().as_ref()],
         bump,
-        realloc = 14 + user_stake_entry.stakes_number as usize,
+        realloc = 8 + UserStakeEntry::SPACE + StakeInfo::SPACE * (user_stake_entry.stakes_number as usize + 1),
         realloc::payer = user,
         realloc::zero = false,
     )]
     pub user_stake_entry: Account<'info, UserStakeEntry>,
+    #[account(
+        mut,
+        seeds = [b"presale_vault"],
+        bump,
+    )]
+    pub presale_vault: Account<'info, PresaleVault>,
     #[account(mut)]
     pub pool_state: Account<'info, PoolState>,
     pub presale_state: Account<'info, PresaleState>,
     #[account(mut)]
     pub user: Signer<'info>,
     pub system_program: Program<'info, System>,
+    pub clock: Sysvar<'info, Clock>,
 }
