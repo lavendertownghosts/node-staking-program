@@ -7,11 +7,10 @@ pub struct PresaleState {
     pub presale_start_at: i64,
     pub presale_end_at: i64,
     pub total_presale_amount: u64,
-    pub sold_nodes: u64
 }
 
 impl PresaleState {
-    pub const SPACE: usize = 8 * 3 + 8 * 2 + 2;
+    pub const SPACE: usize = 8 * 2 + 8 * 2 + 2;
 }
 
 #[account]
@@ -29,20 +28,11 @@ impl PoolState {
 
 #[account]
 pub struct UserStakeEntry {
-    pub stakes_number: u16,         //number of user's staking nodes
-    pub stakes: Vec<StakeInfo>
+    pub claimable_amount: u16,
+    pub staked_amount: u16,
+    pub last_staked_at: i64,
 }
 
 impl UserStakeEntry {
-    pub const SPACE: usize = 2 + 4;
-}
-
-#[account]
-pub struct StakeInfo {
-    pub amount: u16,
-    pub stake_date: i64,
-}
-
-impl StakeInfo {
-    pub const SPACE: usize = 2 + 8;
+    pub const SPACE: usize = 2 + 2 + 8;
 }

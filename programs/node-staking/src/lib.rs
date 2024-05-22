@@ -8,9 +8,9 @@ use {
     solana_program::{pubkey, pubkey::Pubkey},
 };
 
-declare_id!("AXqBSUwjqjcjyvmo1P3ziVZiSXFiLw5cRJo2abbLPaBa");
+declare_id!("2MMRBsMuwHKpa39qukViyErH35A7onSHWfw2WY9RC16U");
 
-pub static POOL_AUTHORITY: Pubkey = pubkey!("6NkVPy6o8q4Rg3nPS54mwt1hegpdfbrW7ra9Zo2RLHGg");
+pub static POOL_AUTHORITY: Pubkey = pubkey!("EMZQyHyda9aXWqJsJYDUHCEbE5kibagRkNxY8TbPndYx");
 
 #[program]
 pub mod node_staking {
@@ -46,7 +46,6 @@ pub mod node_staking {
         presale.presale_start_at = presale_start_at;
         presale.presale_end_at = presale_end_at;
         presale.total_presale_amount = total_presale_amount;
-        presale.sold_nodes = 0;
         
         let pool_state = &mut ctx.accounts.pool_state;
         pool_state.total_nodes = total_presale_amount;
@@ -63,14 +62,8 @@ pub mod node_staking {
 
     pub fn initialize_user_stake(ctx: Context<InitializeUserStake>) -> Result<()> {
         let user_stake_entry = &mut ctx.accounts.user_stake_entry;
-        user_stake_entry.stakes_number = 0;
-
-        let stake_info = StakeInfo {
-            amount: 0,
-            stake_date: Clock::get().unwrap().unix_timestamp,
-        };
-
-        user_stake_entry.stakes.push(stake_info);
+        user_stake_entry.claimable_amount = 0;
+        user_stake_entry.staked_amount = 0;
 
         Ok(())
     }
@@ -83,10 +76,10 @@ pub mod node_staking {
         let user_lamports = **ctx.accounts.user.to_account_info().try_borrow_lamports()?;
         let needed_lamports = presale_state.price_per_node.checked_mul(amount.into()).ok_or(ErrorCode::UnableCalculatingNodesPrice)?;
 
-        require!(user_stake_entry.stakes_number + amount < presale_state.max_allocation, 
+        require!(user_stake_entry.staked_amount + amount < presale_state.max_allocation, 
             ErrorCode::StakesAmountOverflow
         );
-        require!(pool_state.total_nodes > amount.into(), 
+        require!(pool_state.total_nodes >= amount.into(), 
             ErrorCode::LackNodes
         );
         require!(user_lamports > needed_lamports, ErrorCode::InsufficientBalanceForPresale);
@@ -96,14 +89,11 @@ pub mod node_staking {
 
         send_lamports(user.to_account_info(), presale_valut.to_account_info(), needed_lamports)?;
 
-        let stake_info = StakeInfo {
-            amount,
-            stake_date: presale_state.presale_end_at,
-        };
+        user_stake_entry.staked_amount = user_stake_entry.staked_amount.checked_add(amount).ok_or(ErrorCode::UserAmountOverflow)?;
 
-        user_stake_entry.stakes_number = user_stake_entry.stakes_number.checked_add(amount).ok_or(ErrorCode::UserAmountOverflow)?;
+        user_stake_entry.last_staked_at = presale_state.presale_end_at;
 
-        user_stake_entry.stakes.push(stake_info);
+        pool_state.total_nodes = pool_state.total_nodes.checked_sub(amount.into()).ok_or(ErrorCode::LackNodes)?;
 
         Ok(())
     }
@@ -115,7 +105,7 @@ pub struct InitializePresale<'info> {
         init, 
         payer = pool_authority, 
         space = 8 + PresaleState::SPACE,
-        seeds = [b"pool_state"],
+        seeds = [b"presale_state"],
         bump
     )]
     pub presale: Account<'info, PresaleState>, 
@@ -133,6 +123,11 @@ pub struct InitializePresale<'info> {
         @ ErrorCode::InvalidPoolAuthority
     )]
     pub pool_authority: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [b"pool_state"],
+        bump,
+    )]
     pub pool_state: Account<'info, PoolState>,
     pub system_program: Program<'info, System>,
 }
@@ -148,8 +143,8 @@ pub struct InitializePool<'info> {
         init, 
         payer = pool_authority, 
         space = 8 + PoolState::SPACE,
-        seeds = [b"presale_state"],
-        bump
+        seeds = [b"pool_state"],
+        bump,
     )]
     pub pool_state: Account<'info, PoolState>,
     #[account(
@@ -166,7 +161,7 @@ pub struct MintNodes<'info> {
     #[account(
         mut,
         seeds = [b"pool_state"],
-        bump
+        bump,
     )]
     pub pool_state: Account<'info, PoolState>,
     #[account(
@@ -197,9 +192,9 @@ pub struct PresaleNodes<'info> {
         mut,
         seeds = [user.key().as_ref()],
         bump,
-        realloc = 8 + UserStakeEntry::SPACE + StakeInfo::SPACE * (user_stake_entry.stakes_number as usize + 1),
-        realloc::payer = user,
-        realloc::zero = false,
+        // realloc = 8 + UserStakeEntry::SPACE + StakeInfo::SPACE * (user_stake_entry.stakes_number as usize + 1),
+        // realloc::payer = user,
+        // realloc::zero = false,
     )]
     pub user_stake_entry: Account<'info, UserStakeEntry>,
     #[account(
@@ -208,7 +203,11 @@ pub struct PresaleNodes<'info> {
         bump,
     )]
     pub presale_vault: Account<'info, PresaleVault>,
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"pool_state"],
+        bump,
+    )]
     pub pool_state: Account<'info, PoolState>,
     pub presale_state: Account<'info, PresaleState>,
     #[account(mut)]
