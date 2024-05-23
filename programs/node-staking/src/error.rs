@@ -20,4 +20,6 @@ pub enum ErrorCode {
     UnableCalculatingNodesPrice,
     #[msg("Insufficient balance for presale")]
     InsufficientBalanceForPresale,
+    #[msg("Only owner can withdraw capital")]
+    InvalidVaultAuthority,
 }
