@@ -8,9 +8,11 @@ use {
     solana_program::{pubkey, pubkey::Pubkey},
 };
 
-declare_id!("2MMRBsMuwHKpa39qukViyErH35A7onSHWfw2WY9RC16U");
+declare_id!("4dtYh4bYBJ8P2ssASw5izqLjfTEJYMDHCmuhAipcr6vc");
 
 pub static POOL_AUTHORITY: Pubkey = pubkey!("EMZQyHyda9aXWqJsJYDUHCEbE5kibagRkNxY8TbPndYx");
+
+pub static VAULT_AUTHORITY: Pubkey = pubkey!("6JvsMVc9rwY9AG63qsqrfoDcNPgRmx9JfMHMHaX7TRoS");
 
 #[program]
 pub mod node_staking {
@@ -96,6 +98,10 @@ pub mod node_staking {
         pool_state.total_nodes = pool_state.total_nodes.checked_sub(amount.into()).ok_or(ErrorCode::LackNodes)?;
 
         Ok(())
+    }
+
+    pub fn withdraw_cap(ctx: Context<WithdrawCap>) -> Result<()> {
+        ctx.accounts.send_lamports_from_vault_to_owner()
     }
 }
 
@@ -214,4 +220,37 @@ pub struct PresaleNodes<'info> {
     pub user: Signer<'info>,
     pub system_program: Program<'info, System>,
     pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawCap<'info> {
+    #[account(
+        mut,
+        seeds = [b"presale_vault"],
+        bump
+    )]
+    pub presale_vault: Account<'info, PresaleVault>,
+    #[account(
+        mut,
+        constraint = withdrawer.key() == VAULT_AUTHORITY
+        @ ErrorCode::InvalidVaultAuthority
+    )]
+    pub withdrawer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+impl<'info> WithdrawCap<'info> {
+    pub fn send_lamports_from_vault_to_owner(&mut self) -> Result<()> {
+        let presale_vault = self.presale_vault.to_account_info();
+        let presale_vault_data_len = presale_vault.try_data_len()?;
+        let presale_vault_minimum_rent_exempt_balance = self.rent.minimum_balance(presale_vault_data_len);
+        let all_presale_vault_lamports = **presale_vault.try_borrow_lamports()?;
+        let available_lamports = all_presale_vault_lamports - presale_vault_minimum_rent_exempt_balance;
+
+        **presale_vault.try_borrow_mut_lamports()? -= available_lamports;
+        **self.withdrawer.try_borrow_mut_lamports()? += available_lamports;
+
+        Ok(())
+    }
 }
