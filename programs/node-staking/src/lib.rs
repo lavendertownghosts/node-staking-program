@@ -6,6 +6,16 @@ mod helper; use helper::*;
 use {
     anchor_lang::prelude::*,
     solana_program::{pubkey, pubkey::Pubkey},
+    anchor_spl::{
+        associated_token::AssociatedToken,
+        token::{mint_to, Mint, MintTo, Token, TokenAccount},
+        metadata::{
+            create_metadata_accounts_v3,
+            mpl_token_metadata::types::DataV2,
+            CreateMetadataAccountsV3,
+            Metadata as Metaplex,
+        },
+    }
 };
 
 declare_id!("4dtYh4bYBJ8P2ssASw5izqLjfTEJYMDHCmuhAipcr6vc");
@@ -51,6 +61,65 @@ pub mod node_staking {
         
         let pool_state = &mut ctx.accounts.pool_state;
         pool_state.total_nodes = total_presale_amount;
+
+        Ok(())
+    }
+
+    pub fn initialize_token (ctx: Context<InitializeToken>) -> Result<()> {
+        let seeds = &["mint".as_bytes(), &[ctx.bumps.mint]];
+        let signer = [&seeds[..]];
+
+        let token_data: DataV2 = DataV2 {
+            name: "Solana Node Staking Token".to_string(),
+            symbol: "NST".to_string(),
+            uri: "https://ipfs.io/ipfs/QmQ5m5WQPrgDGU24KmPJsCiMzAWyEaZZuohxssVeZP8LVH".to_string(),
+            seller_fee_basis_points: 0,
+            creators: None,
+            collection: None,
+            uses: None,
+        };
+
+        let metadata_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_metadata_program.to_account_info(), 
+            CreateMetadataAccountsV3 {
+                payer: ctx.accounts.pool_authority.to_account_info(),
+                update_authority: ctx.accounts.mint.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
+                metadata: ctx.accounts.metadata.to_account_info(),
+                mint_authority: ctx.accounts.mint.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                rent: ctx.accounts.rent.to_account_info(),
+            }, 
+            &signer
+        );
+
+        create_metadata_accounts_v3(
+            metadata_ctx,
+            token_data,
+            false,
+            true,
+            None,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn mint_tokens(ctx: Context<MintTokens>, amount: u64) -> Result<()> {
+        let seeds = &["mint".as_bytes(), &[ctx.bumps.mint]];
+        let signer = [&seeds[..]];
+
+        mint_to(
+            CpiContext::new_with_signer(
+                ctx.accounts.mint.to_account_info(), 
+                MintTo {
+                    authority: ctx.accounts.mint.to_account_info(),
+                    to: ctx.accounts.token_vault.to_account_info(),
+                    mint: ctx.accounts.mint.to_account_info()
+                }, 
+                &signer
+            ), 
+            amount,
+        )?;
 
         Ok(())
     }
@@ -154,11 +223,79 @@ pub struct InitializePool<'info> {
     )]
     pub pool_state: Account<'info, PoolState>,
     #[account(
+        init,
+        seeds = [b"mint"],
+        bump,
+        payer = pool_authority,
+        mint::decimals = 18,
+        mint::authority = mint,
+    )]
+    pub mint: Account<'info, Mint>,
+    #[account(
+        init,
+        payer = pool_authority,
+        associated_token::mint = mint,
+        associated_token::authority = pool_authority
+    )]
+    pub token_vault: Account<'info, TokenAccount>,
+    #[account(
         mut,
         constraint = pool_authority.key() == POOL_AUTHORITY
         @ ErrorCode::InvalidPoolAuthority
     )]
     pub pool_authority: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub rent: Sysvar<'info, Rent>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeToken<'info> {
+    #[account(mut)]
+    /// CHECK: This is not dangerous because we are interacting with the metadata account managed by the Metadata program
+    pub metadata: UncheckedAccount<'info>,
+    #[account(
+        mut,
+        seeds = [b"mint"],
+        bump,
+        mint::authority = mint,
+    )]
+    pub mint: Account<'info, Mint>,
+    #[account(
+        mut,
+        constraint = pool_authority.key() == POOL_AUTHORITY
+        @ ErrorCode::InvalidPoolAuthority
+    )]
+    pub pool_authority: Signer<'info>,
+    pub rent: Sysvar<'info, Rent>,
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    pub token_metadata_program: Program<'info, Metaplex>,
+}
+
+#[derive(Accounts)]
+pub struct MintTokens<'info> {
+    #[account(
+        mut,
+        seeds = [b"mint"],
+        bump,
+        mint::authority = mint
+    )]
+    pub mint: Account<'info, Mint>,
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = pool_authority
+    )]
+    pub token_vault: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        constraint = pool_authority.key() == POOL_AUTHORITY
+        @ ErrorCode::InvalidPoolAuthority
+    )]
+    pub pool_authority: Signer<'info>,
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
