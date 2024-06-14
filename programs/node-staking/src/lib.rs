@@ -18,7 +18,7 @@ use {
     }
 };
 
-declare_id!("4dtYh4bYBJ8P2ssASw5izqLjfTEJYMDHCmuhAipcr6vc");
+declare_id!("C5F4J8RkHdWRtNkQsAtzFVDECLv7sncRVhukvVxfBpcs");
 
 pub static POOL_AUTHORITY: Pubkey = pubkey!("EMZQyHyda9aXWqJsJYDUHCEbE5kibagRkNxY8TbPndYx");
 
@@ -33,6 +33,7 @@ pub mod node_staking {
         tokens_per_node: u64,           // number of tokens to purchase node
         reward_per_node: u8,            // reward of each node to user per day
         max_allocation: u16,            // limit number of nodes purchased by each wallet
+        treasury_to_selling: f32,
     ) -> Result<()> {
         let pool_state = &mut ctx.accounts.pool_state;
 
@@ -40,7 +41,12 @@ pub mod node_staking {
         pool_state.tokens_per_node = tokens_per_node;
         pool_state.reward_per_node = reward_per_node;
         pool_state.max_allocation = max_allocation;
+        pool_state.treasury_to_selling = treasury_to_selling;
 
+        Ok(())
+    }
+
+    pub fn initialize_selling_vault(_ctx: Context<InitializeSellingVault>) -> Result<()> {
         Ok(())
     }
 
@@ -72,7 +78,7 @@ pub mod node_staking {
         let token_data: DataV2 = DataV2 {
             name: "Solana Node Staking Token".to_string(),
             symbol: "NST".to_string(),
-            uri: "https://ipfs.io/ipfs/QmQ5m5WQPrgDGU24KmPJsCiMzAWyEaZZuohxssVeZP8LVH".to_string(),
+            uri: "https://ipfs.io/ipfs/QmRtzvCek4tv3u9r1zjEm3wZbuT8MQtaaoAGonZK1CATkB".to_string(),
             seller_fee_basis_points: 0,
             creators: None,
             collection: None,
@@ -107,18 +113,35 @@ pub mod node_staking {
     pub fn mint_tokens(ctx: Context<MintTokens>, amount: u64) -> Result<()> {
         let seeds = &["mint".as_bytes(), &[ctx.bumps.mint]];
         let signer = [&seeds[..]];
+        let treasury_to_selling = ctx.accounts.pool_state.treasury_to_selling;
+        let treasury_amount = (treasury_to_selling / (treasury_to_selling + 1.0)) * (amount as f32);
+        let treasury_amount = treasury_amount as u64;
+        let selling_amount = amount.checked_sub(treasury_amount).ok_or(ErrorCode::UnableCalculatingSellingTokens)?;
 
         mint_to(
             CpiContext::new_with_signer(
                 ctx.accounts.mint.to_account_info(), 
                 MintTo {
                     authority: ctx.accounts.mint.to_account_info(),
-                    to: ctx.accounts.token_vault.to_account_info(),
+                    to: ctx.accounts.treasury_vault.to_account_info(),
                     mint: ctx.accounts.mint.to_account_info()
                 }, 
                 &signer
             ), 
-            amount,
+            treasury_amount,
+        )?;
+
+        mint_to(
+            CpiContext::new_with_signer(
+                ctx.accounts.mint.to_account_info(), 
+                MintTo {
+                    authority: ctx.accounts.mint.to_account_info(),
+                    to: ctx.accounts.selling_vault.to_account_info(),
+                    mint: ctx.accounts.mint.to_account_info()
+                }, 
+                &signer
+            ), 
+            selling_amount,
         )?;
 
         Ok(())
@@ -237,7 +260,7 @@ pub struct InitializePool<'info> {
         associated_token::mint = mint,
         associated_token::authority = pool_authority
     )]
-    pub token_vault: Account<'info, TokenAccount>,
+    pub treasury_vault: Account<'info, TokenAccount>,
     #[account(
         mut,
         constraint = pool_authority.key() == POOL_AUTHORITY
@@ -248,6 +271,36 @@ pub struct InitializePool<'info> {
     pub rent: Sysvar<'info, Rent>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeSellingVault<'info> {
+    #[account(
+        seeds = [b"pool_state"],
+        bump,
+    )]
+    pub pool_state: Account<'info, PoolState>,
+    #[account(
+        seeds = [b"mint"],
+        bump,
+    )]
+    pub mint: Account<'info, Mint>,
+    #[account(
+        init,
+        payer = pool_authority,
+        associated_token::mint = mint,
+        associated_token::authority = pool_state
+    )]
+    pub selling_vault: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        constraint = pool_authority.key() == POOL_AUTHORITY
+        @ ErrorCode::InvalidPoolAuthority
+    )]
+    pub pool_authority: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>
 }
 
 #[derive(Accounts)]
@@ -277,6 +330,11 @@ pub struct InitializeToken<'info> {
 #[derive(Accounts)]
 pub struct MintTokens<'info> {
     #[account(
+        seeds = [b"pool_state"],
+        bump,
+    )]
+    pub pool_state: Account<'info, PoolState>,
+    #[account(
         mut,
         seeds = [b"mint"],
         bump,
@@ -288,13 +346,20 @@ pub struct MintTokens<'info> {
         associated_token::mint = mint,
         associated_token::authority = pool_authority
     )]
-    pub token_vault: Account<'info, TokenAccount>,
+    pub treasury_vault: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = pool_state
+    )]
+    pub selling_vault: Account<'info, TokenAccount>,
     #[account(
         mut,
         constraint = pool_authority.key() == POOL_AUTHORITY
         @ ErrorCode::InvalidPoolAuthority
     )]
     pub pool_authority: Signer<'info>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
@@ -335,9 +400,6 @@ pub struct PresaleNodes<'info> {
         mut,
         seeds = [user.key().as_ref()],
         bump,
-        // realloc = 8 + UserStakeEntry::SPACE + StakeInfo::SPACE * (user_stake_entry.stakes_number as usize + 1),
-        // realloc::payer = user,
-        // realloc::zero = false,
     )]
     pub user_stake_entry: Account<'info, UserStakeEntry>,
     #[account(
