@@ -20,10 +20,11 @@ pub struct PoolState {
     pub total_tokens: u64,
     pub tokens_per_node: u64,
     pub reward_per_node: u8,
+    pub treasury_to_selling: f32,
 }
 
 impl PoolState {
-    pub const SPACE: usize = 8 * 3 + 2 + 1;
+    pub const SPACE: usize = 8 * 3 + 2 + 1 + 4;
 }
 
 #[account]

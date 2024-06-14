@@ -18,6 +18,8 @@ pub enum ErrorCode {
     UserAmountOverflow,
     #[msg("Can not calcuate price for requested nodes")]
     UnableCalculatingNodesPrice,
+    #[msg("Can not calcuate selling amount")]
+    UnableCalculatingSellingTokens,
     #[msg("Insufficient balance for presale")]
     InsufficientBalanceForPresale,
     #[msg("Only owner can withdraw capital")]
