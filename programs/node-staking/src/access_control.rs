@@ -18,3 +18,16 @@ pub fn round_presale<'info>(
     }
     Ok(())
 }
+
+pub fn round_staking<'info>(
+    presale_state: &Account<'info, PresaleState>,
+    clock: &Sysvar<'info, Clock>,
+) -> Result<()> {
+    let presale_end_at = presale_state.presale_end_at;
+
+    if presale_end_at > clock.unix_timestamp {
+        return err!(ErrorCode::NotEndedPresale);
+    }
+
+    Ok(())
+}

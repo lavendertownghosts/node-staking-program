@@ -24,4 +24,12 @@ pub enum ErrorCode {
     InsufficientBalanceForPresale,
     #[msg("Only owner can withdraw capital")]
     InvalidVaultAuthority,
+    #[msg("Presale is not ended")]
+    NotEndedPresale,
+    #[msg("User token balance is not enough to buy nodes")]
+    LackUserTokenBalance,
+    #[msg("Can not calculate sum")]
+    UnavailableCaculateSum,
+    #[msg("Can not calculate sub")]
+    UnavailableCaculateSub,
 }
