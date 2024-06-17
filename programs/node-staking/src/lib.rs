@@ -8,7 +8,7 @@ use {
     solana_program::{pubkey, pubkey::Pubkey},
     anchor_spl::{
         associated_token::AssociatedToken,
-        token::{mint_to, Mint, MintTo, Token, TokenAccount},
+        token::{mint_to, transfer, Mint, MintTo, Token, TokenAccount, Transfer},
         metadata::{
             create_metadata_accounts_v3,
             mpl_token_metadata::types::DataV2,
@@ -56,7 +56,7 @@ pub mod node_staking {
         max_allocation: u16,            // when presale, limit number of nodes purchased by each wallet
         presale_start_at: i64,         
         presale_end_at: i64,
-        total_presale_amount: u64,
+        total_presale_amount: u16,
     ) -> Result<()> {
         let presale = &mut ctx.accounts.presale;
         presale.price_per_node = price_per_node;
@@ -147,7 +147,7 @@ pub mod node_staking {
         Ok(())
     }
 
-    pub fn mint_nodes(ctx: Context<MintNodes>, amount: u64) -> Result<()> {
+    pub fn mint_nodes(ctx: Context<MintNodes>, amount: u16) -> Result<()> {
         let pool_state = &mut ctx.accounts.pool_state;
         pool_state.total_nodes = pool_state.total_nodes.checked_add(amount).ok_or(ErrorCode::AmountOverflow)?;
 
@@ -194,6 +194,76 @@ pub mod node_staking {
 
     pub fn withdraw_cap(ctx: Context<WithdrawCap>) -> Result<()> {
         ctx.accounts.send_lamports_from_vault_to_owner()
+    }
+
+    #[access_control(round_staking(&ctx.accounts.presale_state, &ctx.accounts.clock))]
+    pub fn create_nodes(ctx: Context<CreateNodes>, amount: u16) -> Result<()> {
+        let pool_nodes_amount = ctx.accounts.pool_state.total_nodes;
+        let tokens_per_node = ctx.accounts.pool_state.tokens_per_node;
+        let needed_tokens = tokens_per_node.checked_mul(amount.into()).ok_or(ErrorCode::UnableCalculatingNodesPrice)?;
+        let user_token_balance = ctx.accounts.user_token_account.amount;
+
+        require!(pool_nodes_amount >= amount, ErrorCode::LackNodes);
+        require!(user_token_balance >= needed_tokens, ErrorCode::LackUserTokenBalance);
+        require!(amount > ctx.accounts.pool_state.max_allocation, ErrorCode::UserAmountOverflow);
+
+        let treasury_to_selling = ctx.accounts.pool_state.treasury_to_selling;
+        let treasury_amount = (treasury_to_selling / (treasury_to_selling + 1.0)) * (needed_tokens as f32);
+        let treasury_amount = treasury_amount as u64;
+
+        let seeds = &[
+            "pool_state".as_bytes(),
+            &[ctx.bumps.pool_state]
+        ];
+
+        transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(), 
+                Transfer {
+                    from: ctx.accounts.user_token_account.to_account_info(),
+                    to: ctx.accounts.selling_vault.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                }
+            ),
+            needed_tokens.into()
+        )?;
+
+        transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(), 
+                Transfer {
+                    from: ctx.accounts.selling_vault.to_account_info(),
+                    to: ctx.accounts.treasury_vault.to_account_info(),
+                    authority: ctx.accounts.pool_state.to_account_info(),
+                },
+                &[&seeds[..]]
+            ),
+            treasury_amount.into()
+        )?;
+
+        let user_stake_entry = &mut ctx.accounts.user_stake_entry;
+        let user_nodes = user_stake_entry.staked_amount;
+
+        if user_nodes == 0 {
+            user_stake_entry.staked_amount = amount;
+            user_stake_entry.claimable_amount = 0;
+            user_stake_entry.last_staked_at = ctx.accounts.clock.unix_timestamp;
+        } else {
+            user_stake_entry.staked_amount = user_nodes.checked_add(amount).ok_or(ErrorCode::UnavailableCaculateSum)?;
+            let user_staked_amount = user_stake_entry.staked_amount;
+            let user_claimable_amount = user_stake_entry.claimable_amount;
+            let last_staked_period = ctx.accounts.clock.unix_timestamp - user_stake_entry.last_staked_at;
+            let additional_claim = user_staked_amount as f32 * 0.5 * ctx.accounts.selling_mint.decimals as f32 * last_staked_period as f32 / 86400 as f32;
+            let additional_claim = additional_claim as u64;
+            user_stake_entry.claimable_amount = user_claimable_amount.checked_add(additional_claim).ok_or(ErrorCode::UnavailableCaculateSum)?;
+            user_stake_entry.staked_amount = user_staked_amount.checked_add(amount).ok_or(ErrorCode::UnavailableCaculateSum)?;
+            user_stake_entry.last_staked_at = ctx.accounts.clock.unix_timestamp;
+        }
+
+        let pool_state = &mut ctx.accounts.pool_state;
+        pool_state.total_nodes = pool_nodes_amount.checked_sub(amount).ok_or(ErrorCode::UnavailableCaculateSub)?;
+
+        Ok(())
     }
 }
 
@@ -452,4 +522,51 @@ impl<'info> WithdrawCap<'info> {
 
         Ok(())
     }
+}
+
+#[derive(Accounts)]
+pub struct CreateNodes<'info> {
+    #[account(
+        seeds = [b"presale_state"],
+        bump,
+    )]
+    pub presale_state: Account<'info, PresaleState>,
+    #[account(
+        seeds = [b"pool_state"],
+        bump,
+        has_one = selling_mint,
+        has_one = selling_vault,
+    )]
+    pub pool_state: Account<'info, PoolState>,
+    #[account(
+        seeds = [b"mint"],
+        bump,
+    )]
+    pub selling_mint: Account<'info, Mint>,
+    #[account(
+        mut,
+        associated_token::mint = selling_mint,
+        associated_token::authority = POOL_AUTHORITY,
+    )]
+    pub treasury_vault: Account<'info, TokenAccount>,
+    #[account(
+        associated_token::mint = selling_mint,
+        associated_token::authority = pool_state,
+    )]
+    pub selling_vault: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        constraint = user_token_account.owner == user.key(),
+        constraint = user_token_account.mint == selling_mint.key(),
+    )]
+    pub user_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        seeds = [user.key().as_ref()],
+        bump,
+    )]
+    pub user_stake_entry: Account<'info, UserStakeEntry>,
+    pub user: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+    pub clock: Sysvar<'info, Clock>,
 }
