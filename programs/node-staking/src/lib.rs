@@ -18,7 +18,7 @@ use {
     }
 };
 
-declare_id!("C5F4J8RkHdWRtNkQsAtzFVDECLv7sncRVhukvVxfBpcs");
+declare_id!("6TMoqcXXGgtyEtzhz9KR1YpBNGw9Zj9MEi9vnASLzAvh");
 
 pub static POOL_AUTHORITY: Pubkey = pubkey!("EMZQyHyda9aXWqJsJYDUHCEbE5kibagRkNxY8TbPndYx");
 
@@ -46,7 +46,10 @@ pub mod node_staking {
         Ok(())
     }
 
-    pub fn initialize_selling_vault(_ctx: Context<InitializeSellingVault>) -> Result<()> {
+    pub fn initialize_selling_vault(ctx: Context<InitializeSellingVault>) -> Result<()> {
+        let pool_state = &mut ctx.accounts.pool_state;
+        pool_state.selling_mint = ctx.accounts.mint.key();
+        pool_state.selling_vault = ctx.accounts.selling_vault.key();
         Ok(())
     }
 
@@ -205,7 +208,7 @@ pub mod node_staking {
 
         require!(pool_nodes_amount >= amount, ErrorCode::LackNodes);
         require!(user_token_balance >= needed_tokens, ErrorCode::LackUserTokenBalance);
-        require!(amount > ctx.accounts.pool_state.max_allocation, ErrorCode::UserAmountOverflow);
+        require!(amount <= ctx.accounts.pool_state.max_allocation, ErrorCode::UserAmountOverflow);
 
         let treasury_to_selling = ctx.accounts.pool_state.treasury_to_selling;
         let treasury_amount = (treasury_to_selling / (treasury_to_selling + 1.0)) * (needed_tokens as f32);
@@ -244,12 +247,13 @@ pub mod node_staking {
         let user_stake_entry = &mut ctx.accounts.user_stake_entry;
         let user_nodes = user_stake_entry.staked_amount;
 
+        msg!("token transfer successful");
+
         if user_nodes == 0 {
             user_stake_entry.staked_amount = amount;
             user_stake_entry.claimable_amount = 0;
             user_stake_entry.last_staked_at = ctx.accounts.clock.unix_timestamp;
         } else {
-            user_stake_entry.staked_amount = user_nodes.checked_add(amount).ok_or(ErrorCode::UnavailableCaculateSum)?;
             let user_staked_amount = user_stake_entry.staked_amount;
             let user_claimable_amount = user_stake_entry.claimable_amount;
             let last_staked_period = ctx.accounts.clock.unix_timestamp - user_stake_entry.last_staked_at;
@@ -261,7 +265,13 @@ pub mod node_staking {
         }
 
         let pool_state = &mut ctx.accounts.pool_state;
-        pool_state.total_nodes = pool_nodes_amount.checked_sub(amount).ok_or(ErrorCode::UnavailableCaculateSub)?;
+        pool_state.total_nodes = pool_state.total_nodes.checked_sub(amount).ok_or(ErrorCode::UnavailableCaculateSub)?;
+
+        Ok(())
+    }
+
+    #[access_control(round_staking(&ctx.accounts.presale_state, &ctx.accounts.clock))]
+    pub fn claim_nodes(ctx: Context<ClaimNodes>, amount: u16) -> Result<()> {
 
         Ok(())
     }
@@ -369,6 +379,7 @@ pub struct InitializeSellingVault<'info> {
     )]
     pub pool_authority: Signer<'info>,
     pub token_program: Program<'info, Token>,
+    pub rent: Sysvar<'info, Rent>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>
 }
@@ -532,15 +543,17 @@ pub struct CreateNodes<'info> {
     )]
     pub presale_state: Account<'info, PresaleState>,
     #[account(
+        mut,
         seeds = [b"pool_state"],
         bump,
-        has_one = selling_mint,
-        has_one = selling_vault,
+        // has_one = selling_mint,
+        // has_one = selling_vault,
     )]
     pub pool_state: Account<'info, PoolState>,
     #[account(
         seeds = [b"mint"],
         bump,
+        mint::authority = selling_mint,
     )]
     pub selling_mint: Account<'info, Mint>,
     #[account(
@@ -550,6 +563,7 @@ pub struct CreateNodes<'info> {
     )]
     pub treasury_vault: Account<'info, TokenAccount>,
     #[account(
+        mut,
         associated_token::mint = selling_mint,
         associated_token::authority = pool_state,
     )]
@@ -568,5 +582,6 @@ pub struct CreateNodes<'info> {
     pub user_stake_entry: Account<'info, UserStakeEntry>,
     pub user: Signer<'info>,
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
     pub clock: Sysvar<'info, Clock>,
 }
